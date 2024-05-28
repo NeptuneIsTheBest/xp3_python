@@ -1,4 +1,5 @@
 import os
+import re
 import zlib
 import struct
 import ctypes
@@ -154,6 +155,15 @@ class XP3Parser:
         for file in self.file_manager:
             file_info = file["info"]
             file_name = file_info["file_name"]
+
+            pattern = re.compile(r'[<>:"/\\|?*]')
+            file_name = pattern.sub('_', file_name)
+
+            if len(file_name) > 221:
+                base_name, extension = os.path.splitext(file_name)
+                base_name = base_name[:221 - len(extension)]
+                file_name = base_name + extension
+
             segments = file["segm"]
 
             output_path = os.path.join(output_dir, file_name)
