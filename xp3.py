@@ -156,9 +156,6 @@ class XP3Parser:
             file_info = file["info"]
             file_name = file_info["file_name"]
 
-            pattern = re.compile(r'[<>:"/\\|?*]')
-            file_name = pattern.sub('_', file_name)
-
             if len(file_name) > 221:
                 base_name, extension = os.path.splitext(file_name)
                 base_name = base_name[:221 - len(extension)]
@@ -179,3 +176,7 @@ class XP3Parser:
                     if is_compressed:
                         seg_data = zlib.decompress(seg_data)
                     f.write(seg_data)
+
+
+xp3 = XP3Parser(r"C:\Users\13058\Downloads\真恋寄语枫秋\data.xp3")
+xp3.extract()
