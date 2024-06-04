@@ -1,8 +1,8 @@
-import os
-import re
-import zlib
-import struct
 import ctypes
+import hashlib
+import os
+import struct
+import zlib
 
 W_CHAR_SIZE = ctypes.sizeof(ctypes.c_wchar)
 
@@ -14,6 +14,11 @@ class XP3Parser:
         self.xp3_path = xp3_path
         with open(self.xp3_path, 'rb') as f:
             self.xp3_data = f.read()
+
+        for i in range(len(self.xp3_data) - 11):
+            if self.xp3_data[i:i + 11] == bytes.fromhex('58 50 33 0D 0A 20 0A 1A 8B 67 01'):
+                self.xp3_data = self.xp3_data[i:]
+                break
 
         if self.xp3_data[0:11] != bytes.fromhex('58 50 33 0D 0A 20 0A 1A 8B 67 01'):
             raise ValueError('Invalid XP3 header')
@@ -77,13 +82,16 @@ class XP3Parser:
                         j += 8
                         info_file_name_size = struct.unpack("<H", file_manager_section[j:j + 2])[0] * W_CHAR_SIZE
                         j += 2
+
                         if info_size != 4 + 8 + 8 + 2 + info_file_name_size:
                             info_file_name_size = info_size - (4 + 8 + 8 + 2)
-                            # raise ValueError('Invalid XP3 FileManager Info')
                         try:
                             info_file_name = str(file_manager_section[j:j + info_file_name_size], encoding='utf-16')
                         except Exception as e:
-                            info_file_name = str(file_manager_section[j:j + info_file_name_size])
+                            md5 = hashlib.md5()
+                            md5.update(file_manager_section[j:j + info_file_name_size])
+                            info_file_name = md5.hexdigest()
+
                         j += info_file_name_size
                         parsed_file_manager_section["info"] = {
                             "size": info_size,
@@ -135,10 +143,7 @@ class XP3Parser:
                             raise ValueError('Invalid XP3 FileManager Adlr-32 checksum')
                         adlr = struct.unpack("<I", file_manager_section[j:j + adlr_size])[0]
                         j += adlr_size
-                        parsed_file_manager_section["adlr"] = {
-                            "size": adlr_size,
-                            "adlr": adlr
-                        }
+                        parsed_file_manager_section["adlr"] = {"size": adlr_size, "adlr": adlr}
 
                 parsed_file_manager.append(parsed_file_manager_section)
                 i += file_manager_section_size
@@ -156,14 +161,17 @@ class XP3Parser:
             file_info = file["info"]
             file_name = file_info["file_name"]
 
-            if len(file_name) > 221:
+            output_path = os.path.join(output_dir, file_name)
+
+            if len(output_path) > 260 or len(file_name) > 255:
                 base_name, extension = os.path.splitext(file_name)
-                base_name = base_name[:221 - len(extension)]
+                base_name = base_name[:min(259 - len(output_dir) - len(extension) - 1, 254 - len(extension) - 1)]
                 file_name = base_name + extension
+
+                output_path = os.path.join(output_dir, file_name)
 
             segments = file["segm"]
 
-            output_path = os.path.join(output_dir, file_name)
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             with open(output_path, 'wb') as f:
@@ -176,7 +184,3 @@ class XP3Parser:
                     if is_compressed:
                         seg_data = zlib.decompress(seg_data)
                     f.write(seg_data)
-
-
-xp3 = XP3Parser(r"C:\Users\13058\Downloads\真恋寄语枫秋\data.xp3")
-xp3.extract()
