@@ -3,25 +3,28 @@ import hashlib
 import os
 import struct
 import zlib
+import mmap
 
 W_CHAR_SIZE = ctypes.sizeof(ctypes.c_wchar)
 
 
 class XP3Parser:
-    def __init__(self, xp3_path: str = None):
+    def __init__(self, xp3_path: str):
         if xp3_path is None:
             raise ValueError("xp3_path cannot be None")
         self.xp3_path = xp3_path
-        with open(self.xp3_path, 'rb') as f:
-            self.xp3_data = f.read()
 
-        for i in range(len(self.xp3_data) - 11):
-            if self.xp3_data[i:i + 11] == bytes.fromhex('58 50 33 0D 0A 20 0A 1A 8B 67 01'):
-                self.xp3_data = self.xp3_data[i:]
-                break
+        self.xp3_file = open(self.xp3_path, 'rb')
+        self.xp3_size = os.path.getsize(self.xp3_path)
+        self.xp3_data = mmap.mmap(self.xp3_file.fileno(), 0, access=mmap.ACCESS_READ)
 
-        if self.xp3_data[0:11] != bytes.fromhex('58 50 33 0D 0A 20 0A 1A 8B 67 01'):
+        header_signature = bytes.fromhex('58 50 33 0D 0A 20 0A 1A 8B 67 01')
+        index = self.xp3_data.find(header_signature)
+        if index == -1:
             raise ValueError('Invalid XP3 header')
+        else:
+            if index != 0:
+                self.xp3_data = self.xp3_data[index:]
 
         self.file_manager_header_location = self.parse_xp3_header()
 
@@ -31,6 +34,12 @@ class XP3Parser:
         self.file_manager = self.get_file_manager(self.file_manager_header_location, *file_manager_header)
         self.file_manager = self.parse_file_manager(self.file_manager)
 
+    def __del__(self):
+        if hasattr(self, 'xp3_data') and self.xp3_data:
+            self.xp3_data.close()
+        if hasattr(self, 'xp3_file') and self.xp3_file:
+            self.xp3_file.close()
+
     def parse_xp3_header(self):
         if self.xp3_data[11:19] != bytes.fromhex('17 00 00 00 00 00 00 00'):
             return struct.unpack("<Q", self.xp3_data[11:19])[0]
@@ -38,7 +47,8 @@ class XP3Parser:
             return struct.unpack("<Q", self.xp3_data[32:40])[0]
 
     def parse_file_manager_header(self, header_location):
-        is_compressed = True if self.xp3_data[header_location] else False
+        is_compressed = self.xp3_data[header_location] != 0
+
         if is_compressed:
             compressed_size = struct.unpack("<Q", self.xp3_data[header_location + 1:header_location + 9])[0]
             uncompressed_size = struct.unpack("<Q", self.xp3_data[header_location + 9:header_location + 17])[0]
@@ -49,7 +59,8 @@ class XP3Parser:
 
     def get_file_manager(self, header_location, is_compressed, compressed_size, uncompressed_size):
         if is_compressed:
-            decompressed = zlib.decompress(self.xp3_data[header_location + 17:header_location + 17 + compressed_size])
+            compressed_data = self.xp3_data[header_location + 17:header_location + 17 + compressed_size]
+            decompressed = zlib.decompress(compressed_data)
         else:
             decompressed = self.xp3_data[header_location + 9:header_location + 9 + uncompressed_size]
         if len(decompressed) != uncompressed_size:
@@ -59,40 +70,57 @@ class XP3Parser:
     @staticmethod
     def parse_file_manager(file_manager: bytes):
         parsed_file_manager = []
-        for i in range(len(file_manager)):
-            if file_manager[i:i + 4] == b'File':
-                i += 4
+        i = 0
+        file_manager_length = len(file_manager)
+        while i < file_manager_length:
+            index = file_manager.find(b'File', i)
+            if index == -1:
+                break
+            else:
+                i = index + 4
+                if i + 8 > file_manager_length:
+                    raise ValueError('Unexpected end of file manager data')
                 file_manager_section_size = struct.unpack("<Q", file_manager[i:i + 8])[0]
                 i += 8
+                if i + file_manager_section_size > file_manager_length:
+                    raise ValueError('Unexpected end of file manager data')
                 file_manager_section = file_manager[i:i + file_manager_section_size]
                 parsed_file_manager_section = {}
-                for j in range(len(file_manager_section)):
+                j = 0
+                while j < file_manager_section_size:
                     if file_manager_section[j:j + 4] == b'info':
                         j += 4
                         info_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                         j += 8
-                        if struct.unpack("<I", file_manager_section[j:j + 4])[0] == 1 << 31:
-                            info_protect_flag = True
-                        else:
-                            info_protect_flag = False
+
+                        protect_flag_value = struct.unpack("<I", file_manager_section[j:j + 4])[0]
+                        info_protect_flag = (protect_flag_value & (1 << 31)) != 0
                         j += 4
+
                         info_uncompressed_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                         j += 8
+
                         info_storage_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                         j += 8
-                        info_file_name_size = struct.unpack("<H", file_manager_section[j:j + 2])[0] * W_CHAR_SIZE
+
+                        info_file_name_length = struct.unpack("<H", file_manager_section[j:j + 2])[0]
+                        info_file_name_size = info_file_name_length * W_CHAR_SIZE
                         j += 2
 
-                        if info_size != 4 + 8 + 8 + 2 + info_file_name_size:
-                            info_file_name_size = info_size - (4 + 8 + 8 + 2)
-                        try:
-                            info_file_name = str(file_manager_section[j:j + info_file_name_size], encoding='utf-16')
-                        except Exception as e:
-                            md5 = hashlib.md5()
-                            md5.update(file_manager_section[j:j + info_file_name_size])
-                            info_file_name = md5.hexdigest()
+                        expected_info_size = 4 + 8 + 8 + 2 + info_file_name_size
 
+                        if info_size != expected_info_size:
+                            info_file_name_size = info_size - (4 + 8 + 8 + 2)
+
+                        info_file_name_data = file_manager_section[j:j + info_file_name_size]
+                        try:
+                            info_file_name = info_file_name_data.decode('utf-16-le').rstrip('\x00')
+                        except UnicodeDecodeError:
+                            md5 = hashlib.md5()
+                            md5.update(info_file_name_data)
+                            info_file_name = md5.hexdigest()
                         j += info_file_name_size
+
                         parsed_file_manager_section["info"] = {
                             "size": info_size,
                             "protect_flag": info_protect_flag,
@@ -101,22 +129,24 @@ class XP3Parser:
                             "file_name_size": info_file_name_size,
                             "file_name": info_file_name
                         }
-
-                    if file_manager_section[j:j + 4] == b"segm":
+                    elif file_manager_section[j:j + 4] == b'segm':
                         j += 4
                         segm_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
-                        if segm_size % (4 + 8 + 8 + 8) != 0:
-                            raise ValueError('Invalid XP3 FileManager Segment')
                         j += 8
 
+                        num_segments = segm_size // (4 + 8 + 8 + 8)
                         segm = []
-                        for _ in range(segm_size // (4 + 8 + 8 + 8)):
-                            segm_compressed_flag = struct.unpack("<I", file_manager_section[j:j + 4])[0]
+                        for _ in range(num_segments):
+                            segm_compressed_flag_value = struct.unpack("<I", file_manager_section[j:j + 4])[0]
+                            segm_compressed_flag = bool(segm_compressed_flag_value)
                             j += 4
+
                             segm_offset = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                             j += 8
+
                             segm_uncompressed_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                             j += 8
+
                             segm_storage_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                             j += 8
 
@@ -128,27 +158,25 @@ class XP3Parser:
                                     raise ValueError('Invalid XP3 FileManager Segment')
 
                             segm.append({
-                                "compressed_flag": True if segm_compressed_flag else False,
+                                "compressed_flag": segm_compressed_flag,
                                 "offset": segm_offset,
                                 "uncompressed_size": segm_uncompressed_size,
                                 "storage_size": segm_storage_size
                             })
                         parsed_file_manager_section["segm"] = segm
-
-                    if file_manager_section[j:j + 4] == b"adlr":
+                    elif file_manager_section[j:j + 4] == b'adlr':
                         j += 4
                         adlr_size = struct.unpack("<Q", file_manager_section[j:j + 8])[0]
                         j += 8
                         if adlr_size != 4:
-                            raise ValueError('Invalid XP3 FileManager Adlr-32 checksum')
+                            raise ValueError('Invalid XP3 FileManager adlr checksum')
                         adlr = struct.unpack("<I", file_manager_section[j:j + adlr_size])[0]
                         j += adlr_size
                         parsed_file_manager_section["adlr"] = {"size": adlr_size, "adlr": adlr}
-
+                    else:
+                        break
                 parsed_file_manager.append(parsed_file_manager_section)
                 i += file_manager_section_size
-            else:
-                continue
         return parsed_file_manager
 
     def extract(self, output_dir: str = None):
@@ -158,29 +186,31 @@ class XP3Parser:
             output_dir = os.path.join(output_dir, base_name)
 
         for file in self.file_manager:
-            file_info = file["info"]
-            file_name = file_info["file_name"]
+            file_info = file.get("info", {})
+            file_name = file_info.get("file_name", "unnamed_file")
 
             output_path = os.path.join(output_dir, file_name)
 
             if len(output_path) > 260 or len(file_name) > 255:
                 base_name, extension = os.path.splitext(file_name)
-                base_name = base_name[:min(259 - len(output_dir) - len(extension) - 1, 254 - len(extension) - 1)]
+                max_base_name_length = min(259 - len(output_dir) - len(extension) - 1,
+                                           254 - len(extension) - 1)
+                base_name = base_name[:max_base_name_length]
                 file_name = base_name + extension
-
                 output_path = os.path.join(output_dir, file_name)
 
-            segments = file["segm"]
+            segments = file.get("segm", [])
 
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            with open(output_path, 'wb') as f:
+            with open(output_path, 'wb') as f_out:
                 for segment in segments:
                     offset = segment["offset"]
                     storage_size = segment["storage_size"]
                     is_compressed = segment["compressed_flag"]
 
-                    seg_data = self.xp3_data[offset:offset + storage_size]
+                    self.xp3_file.seek(offset)
+                    seg_data = self.xp3_file.read(storage_size)
                     if is_compressed:
                         seg_data = zlib.decompress(seg_data)
-                    f.write(seg_data)
+                    f_out.write(seg_data)
